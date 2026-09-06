@@ -1,0 +1,9 @@
+{
+  "uuid": "wechat-toggle@local",
+  "name": "WeChat Toggle",
+  "description": "Alt+s 一键切换微信主窗口:显示 ↔ 最小化;未运行时自动启动微信。",
+  "version": 1,
+  "settings-schema": "org.gnome.shell.extensions.wechat-toggle",
+  "shell-version": ["50"],
+  "url": ""
+}

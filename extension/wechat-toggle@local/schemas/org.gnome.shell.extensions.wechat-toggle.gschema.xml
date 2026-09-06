@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.wechat-toggle"
+          path="/org/gnome/shell/extensions/wechat-toggle/">
+    <key type="as" name="toggle-wechat">
+      <default><![CDATA[['<Alt>s']]]></default>
+      <summary>切换微信主窗口显示/最小化</summary>
+      <description>按下后:若微信未运行则启动;若已最小化则唤出;若显示中则最小化到任务栏。</description>
+    </key>
+    <key type="s" name="last-geometry">
+      <default>''</default>
+      <summary>微信上次窗口位置</summary>
+      <description>收起前记录的窗口几何 "x,y,宽,高";呼出/启动后用它恢复窗口位置。</description>
+    </key>
+  </schema>
+</schemalist>
