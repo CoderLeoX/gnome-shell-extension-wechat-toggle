@@ -4,13 +4,23 @@
           path="/org/gnome/shell/extensions/wechat-toggle/">
     <key type="as" name="toggle-wechat">
       <default><![CDATA[['<Alt>s']]]></default>
-      <summary>切换微信主窗口显示/最小化</summary>
-      <description>按下后:若微信未运行则启动;若已最小化则唤出;若显示中则最小化到任务栏。</description>
+      <summary>Toggle the WeChat window</summary>
+      <description>Shows WeChat when it is hidden in the tray, and hides it again when the main window is visible.</description>
     </key>
     <key type="s" name="last-geometry">
       <default>''</default>
-      <summary>微信上次窗口位置</summary>
-      <description>收起前记录的窗口几何 "x,y,宽,高";呼出/启动后用它恢复窗口位置。</description>
+      <summary>Position and size of the WeChat window</summary>
+      <description>Window geometry as "x,y,width,height". Stored when the window is hidden and applied again when it is shown.</description>
+    </key>
+    <key type="s" name="wechat-path">
+      <default>''</default>
+      <summary>Path to the WeChat executable</summary>
+      <description>Leave empty to look for "wechat" in PATH and in the usual install locations.</description>
+    </key>
+    <key type="b" name="debug">
+      <default>false</default>
+      <summary>Debug logging</summary>
+      <description>Write window and tray activity to the system log. Only useful when reporting a problem.</description>
     </key>
   </schema>
 </schemalist>
