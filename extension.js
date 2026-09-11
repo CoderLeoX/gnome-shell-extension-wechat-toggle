@@ -55,11 +55,13 @@ const MAIN_MIN_W = 500;
 const MAIN_MIN_H = 400;
 
 /* WeChat applies its own size once login completes, which would override a geometry
-   restored too early, so the geometry is enforced for a while after the window shows
-   up and the polling stops early once position and size have been stable. */
+   restored too early, so the geometry is enforced for a while after the window shows up.
+   The polling stops as soon as position and size are stable, and the number of resizes is
+   capped so that a window which refuses to move is not hammered. */
 const ENFORCE_MS = 3000;
-const SETTLE_TICKS = 12;
-const TICK_MS = 60;
+const SETTLE_TICKS = 6;
+const TICK_MS = 100;
+const MAX_APPLIES = 12;
 
 /* 20 x 500ms budget for a freshly started WeChat to publish its tray icon. */
 const SNI_WAIT_TRIES = 20;
@@ -227,31 +229,42 @@ export default class WeChatToggleExtension extends Extension {
         }
     }
 
-    /* Stores the current geometry, unless the window is not the main window. Without the
-       size check the login window would overwrite the stored geometry with its own. */
-    _rememberGeometry(win) {
+    /* Frame rect that is safe to restore later, or null when the window is a bad source:
+       too small to be the main window (the login window), or maximized, because its rect
+       is then the whole work area and restoring that size makes the window come back
+       maximized. */
+    _safeRect(win) {
         try {
-            if (this._isTooSmallForMain(win)) {
-                this._log('not storing geometry: window is too small to be the main window');
-                return;
-            }
+            if (this._isTooSmallForMain(win))
+                return null;
+
+            if (win.get_maximized() !== 0 || win.fullscreen)
+                return null;
 
             const rect = win.get_frame_rect();
-            if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y))
-                return;
+            if (!rect || !Number.isFinite(rect.x) || !Number.isFinite(rect.y) ||
+                !Number.isFinite(rect.width) || !Number.isFinite(rect.height))
+                return null;
 
-            if (!this._isOnScreen(rect.x, rect.y)) {
-                this._log(`not storing geometry: (${rect.x},${rect.y}) is off screen`);
-                return;
-            }
-
-            const value = `${Math.round(rect.x)},${Math.round(rect.y)},` +
-                `${Math.round(rect.width)},${Math.round(rect.height)}`;
-            this._settings.set_string('last-geometry', value);
-            this._log(`stored geometry ${value}`);
+            return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
         } catch (e) {
-            this._log(`could not store geometry: ${e}`);
+            return null;
         }
+    }
+
+    _storeRect(rect) {
+        if (!rect)
+            return;
+
+        if (!this._isOnScreen(rect.x, rect.y)) {
+            this._log(`not storing geometry: (${rect.x},${rect.y}) is off screen`);
+            return;
+        }
+
+        const value = `${Math.round(rect.x)},${Math.round(rect.y)},` +
+            `${Math.round(rect.width)},${Math.round(rect.height)}`;
+        this._settings.set_string('last-geometry', value);
+        this._log(`stored geometry ${value}`);
     }
 
     _isOnScreen(x, y) {
@@ -272,32 +285,37 @@ export default class WeChatToggleExtension extends Extension {
        in the first place. */
     _onWindowCreated(win) {
         const target = this._geometry();
-        if (!target || !win || (typeof win.is_destroyed === 'function' && win.is_destroyed()))
+        if (!target || !win)
             return;
 
         this._log(`window created (mapped=${win.mapped}, class=${win.get_wm_class() || '-'})`);
 
         const startedAt = GLib.get_monotonic_time() / 1000;
+        const state = {sourceId: 0, handlerId: 0, applies: 0, unmanaged: false, rect: null};
         let settledTicks = 0;
-        let sourceId = 0;
 
         const stop = () => {
-            this._timers.delete(sourceId);
+            if (state.sourceId) {
+                this._timers.delete(state.sourceId);
+                state.sourceId = 0;
+            }
             return GLib.SOURCE_REMOVE;
         };
 
         const apply = () => {
             try {
-                win.move_resize_frame(true, target.x, target.y, target.width, target.height);
+                /* user_op is false on purpose: a resize that looks like a user action makes
+                   window tiling extensions snap the window to a tile of their layout. */
+                win.move_resize_frame(false, target.x, target.y, target.width, target.height);
             } catch (e) {
                 this._log(`move_resize_frame failed: ${e}`);
             }
         };
 
-        sourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
+        state.sourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
             const elapsed = GLib.get_monotonic_time() / 1000 - startedAt;
 
-            if (!win || (typeof win.is_destroyed === 'function' && win.is_destroyed()))
+            if (state.unmanaged || !win)
                 return stop();
 
             /* WM class and title are still empty right after creation. */
@@ -309,28 +327,55 @@ export default class WeChatToggleExtension extends Extension {
                 return stop();
 
             if (this._isTooSmallForMain(win))
-                return elapsed < ENFORCE_MS + 2000 ? GLib.SOURCE_CONTINUE : stop();
+                return elapsed < ENFORCE_MS ? GLib.SOURCE_CONTINUE : stop();
 
-            /* The real main window: remember where it was when it goes away. */
-            if (!this._windowHandlers.has(win)) {
-                const handlerId = win.connect('unmanaged', () => this._rememberGeometry(win));
-                this._windowHandlers.set(win, handlerId);
+            /* The window is about to be touched, so make sure it stops being touched the
+               moment it leaves the window stack. WeChat destroys and recreates its window
+               whenever it is hidden or shown, and resizing a window that is already
+               unmanaged takes the whole Shell down with it (SIGSEGV), which ends the
+               session. Hence the flag, which is checked before every operation. */
+            if (!state.handlerId) {
+                state.handlerId = win.connect('unmanaged', () => {
+                    state.unmanaged = true;
+                    this._windowHandlers.delete(win);
+                    this._storeRect(state.rect);
+                    stop();
+                });
+                this._windowHandlers.set(win, state.handlerId);
             }
 
-            if (win.mapped) {
-                if (!this._matchesTarget(win, target)) {
-                    apply();
-                    settledTicks = 0;
-                } else if (++settledTicks >= SETTLE_TICKS) {
-                    this._log('main window is in place');
+            /* Keep the last usable geometry around: it is stored when the window goes away
+               even if it is closed without the shortcut. */
+            const rect = this._safeRect(win);
+            if (rect)
+                state.rect = rect;
+
+            /* A maximized or fullscreen window is left alone: its rect is the work area,
+               and applying that size is what made the window come back maximized. */
+            if (win.get_maximized() !== 0 || win.fullscreen) {
+                this._log('window is maximized, not touching the geometry');
+                return stop();
+            }
+
+            if (!win.mapped)
+                return elapsed < ENFORCE_MS ? GLib.SOURCE_CONTINUE : stop();
+
+            if (!this._matchesTarget(win, target)) {
+                if (++state.applies > MAX_APPLIES) {
+                    this._log('giving up on the window geometry');
                     return stop();
                 }
+                apply();
+                settledTicks = 0;
+            } else if (++settledTicks >= SETTLE_TICKS) {
+                this._log('main window is in place');
+                return stop();
             }
 
-            return elapsed < ENFORCE_MS + 2000 ? GLib.SOURCE_CONTINUE : stop();
+            return elapsed < ENFORCE_MS ? GLib.SOURCE_CONTINUE : stop();
         });
 
-        this._timers.add(sourceId);
+        this._timers.add(state.sourceId);
     }
 
     /* ------ Toggle ------ */
@@ -351,7 +396,7 @@ export default class WeChatToggleExtension extends Extension {
         }
 
         this._log('toggle: visible, hiding');
-        this._rememberGeometry(win);
+        this._storeRect(this._safeRect(win));
 
         /* WeChat treats a close request as "minimize to tray". The method was renamed in
            GNOME 50 (close -> delete), so both are tried. */

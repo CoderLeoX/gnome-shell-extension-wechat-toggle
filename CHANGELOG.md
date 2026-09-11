@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-09-11
+
+### Fixed
+
+- Resizing a window that WeChat had already withdrawn from the window stack crashed GNOME
+  Shell (SIGSEGV) and ended the session. Windows are no longer touched once they are
+  unmanaged, and the polling stops the moment that happens.
+- A window that was maximized while hidden came back maximized: the stored geometry was the
+  whole work area, and resizing a window to exactly that size is how Mutter decides it should
+  be maximized. Maximized and fullscreen windows are no longer used as the source for the
+  stored geometry, and they are left alone when the window appears.
+
+### Changed
+
+- The geometry is applied with a non-interactive resize, so window tiling extensions no
+  longer read it as a user action and snap the window to one of their tiles.
+- The number of resize attempts is capped and the polling interval is longer.
+
 ## [1.0.0] - 2026-09-11
 
 First public release.
