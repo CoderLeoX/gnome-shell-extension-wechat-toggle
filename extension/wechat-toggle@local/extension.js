@@ -1,3 +1,4 @@
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
@@ -5,9 +6,32 @@ import Shell from 'gi://Shell';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-// 呼出/启动交给这个脚本: 内部用 busctl 调微信托盘 SNI Activate 呼出主窗口;
-// 微信没在运行则启动它。该命令已命令行实测可靠(比在扩展里手工解析 DBus 更稳)。
-const TOGGLE_SCRIPT = '/home/ly/bin/desktop/toggle-wechat.sh';
+// ============================ 呼出/启动(进程内完成) ============================
+// 早先这一步是 spawn 一个外部脚本 toggle-wechat.sh(bash + pgrep + busctl)。
+// 其实脚本干的事在 Shell 进程里用会话总线几行就能做完, 于是统一进来:
+//   * 不再依赖 bash/pgrep/busctl, 也不用在 deploy 时替换脚本路径;
+//   * 少一次进程派生, 更不容易被外部环境(登录 shell、PATH)影响。
+// 脚本文件保留作命令行应急/调试用, 扩展本身已不再需要它。
+const WECHAT_BIN = '/usr/bin/wechat';            // 与脚本里的 WEIXIN_BIN 保持一致
+
+// 微信系统托盘图标的 StatusNotifierItem(SNI) 约定
+// 总线名形如 org.kde.StatusNotifierItem-<pid>-<n>
+const SNI_PREFIX = 'org.kde.StatusNotifierItem-';
+const SNI_PATH = '/StatusNotifierItem';
+const SNI_IFACE = 'org.kde.StatusNotifierItem';
+// 微信进程名(用来确认某个 SNI 是不是微信的, 避免误触别的托盘图标)
+const WECHAT_COMM = 'wechat';
+
+// org.freedesktop.DBus 上的两个辅助方法
+const DBUS_DEST = 'org.freedesktop.DBus';
+const DBUS_PATH = '/org/freedesktop/DBus';
+const DBUS_IFACE = 'org.freedesktop.DBus';
+
+// 启动微信后等它注册 SNI 的上限(20 x 500ms ≈ 10s)
+const SNI_WAIT_TRIES = 20;
+const SNI_WAIT_MS = 500;
+// 单次 DBus 调用超时(毫秒), 防止托盘项卡住把 Alt+s 拖死
+const DBUS_TIMEOUT = 3000;
 
 // ============================ 尺寸门槛(重要) ============================
 // 微信启动/登录时, 会先出现一个很小的“登录/自动登录”中转窗口(实测 280x380),
@@ -34,6 +58,8 @@ export default class WechatToggleExtension extends Extension {
         // GNOME 50: getSettings() 需要显式传 schema id(不再从 uuid 自动推导)
         this._settings = this.getSettings('org.gnome.shell.extensions.wechat-toggle');
         this._timers = new Set();
+        this._sleepers = new Map();
+        this._presenting = false;
         // 把 schema 里的快捷键(toggle-wechat, 默认 <Alt>s)注册为全局快捷键
         Main.wm.addKeybinding(
             'toggle-wechat',
@@ -62,12 +88,20 @@ export default class WechatToggleExtension extends Extension {
             try { global.display.disconnect(this._winSig); } catch (e) {}
             this._winSig = null;
         }
+        // 唤醒还在等待的 _sleep(它们恢复后会因 this._settings 已空而放弃)
+        if (this._sleepers) {
+            for (const resolve of this._sleepers.values()) {
+                try { resolve(); } catch (e) {}
+            }
+            this._sleepers.clear();
+        }
         if (this._timers) {
             for (const id of this._timers) {
                 try { GLib.source_remove(id); } catch (e) {}
             }
             this._timers.clear();
         }
+        this._presenting = false;
         this._settings = null;
     }
 
@@ -259,9 +293,9 @@ export default class WechatToggleExtension extends Extension {
     _onToggle() {
         const win = this._findWechatWindow();
         if (!win) {
-            log('[wt] toggle: no-window → script');
-            // 没有可见窗口: 收在托盘或未运行 → 交给脚本(托盘则呼出, 没运行则启动)
-            GLib.spawn_command_line_async(TOGGLE_SCRIPT);
+            log('[wt] toggle: 无可见窗口 → 托盘呼出 / 启动');
+            // 没有可见窗口: 收在托盘或未运行 → 进程内直接呼出或启动
+            this._presentWechat().catch(e => log(`[wt] present 异常: ${e}`));
             return;
         }
         if (win.minimized) {
@@ -277,6 +311,132 @@ export default class WechatToggleExtension extends Extension {
                 win.close(time);
             else if (typeof win.delete === 'function')
                 win.delete(time);
+        }
+    }
+
+    // ==================== 呼出 / 启动微信(等价于原来那个脚本) ====================
+
+    // 会话总线调用, Promise 封装(避免回调金字塔)
+    _dbusCall(busName, objectPath, iface, method, params) {
+        return new Promise((resolve, reject) => {
+            Gio.DBus.session.call(
+                busName, objectPath, iface, method, params || null, null,
+                Gio.DBusCallFlags.NONE, DBUS_TIMEOUT, null,
+                (conn, res) => {
+                    try {
+                        resolve(conn.call_finish(res));
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+        });
+    }
+
+    // 读 /proc/<pid>/comm: 等价于脚本里的 `pgrep -x wechat`
+    _commOf(pid) {
+        try {
+            const [ok, data] = GLib.file_get_contents(`/proc/${pid}/comm`);
+            if (!ok || !data)
+                return '';
+            return new TextDecoder().decode(data).trim().toLowerCase();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    // 找出"属于微信"的 SNI 总线名。
+    // 必须验证属主: 托盘里还有别的应用, 挨个 Activate 会误触它们。
+    // 用 GetConnectionUnixProcessID(总线守护进程提供, 对任意名字都可靠)拿属主 pid,
+    // 再看该进程是不是 wechat —— 与 busctl list 里 `$2==pid` 的过滤等价。
+    async _wechatSniNames() {
+        const found = [];
+        let reply;
+        try {
+            reply = await this._dbusCall(DBUS_DEST, DBUS_PATH, DBUS_IFACE, 'ListNames', null);
+        } catch (e) {
+            log(`[wt] ListNames 失败: ${e}`);
+            return found;
+        }
+        const [names] = reply.deepUnpack();
+        for (const name of names) {
+            if (!name.startsWith(SNI_PREFIX))
+                continue;
+            try {
+                const r = await this._dbusCall(DBUS_DEST, DBUS_PATH, DBUS_IFACE,
+                    'GetConnectionUnixProcessID', new GLib.Variant('(s)', [name]));
+                const [pid] = r.deepUnpack();
+                const comm = this._commOf(pid);
+                if (comm === WECHAT_COMM) {
+                    found.push(name);
+                } else {
+                    log(`[wt] 跳过非微信托盘项 ${name} (pid=${pid} comm=${comm})`);
+                }
+            } catch (e) {
+                // 拿不到属主信息就不碰它
+            }
+        }
+        return found;
+    }
+
+    // 触发托盘单击(呼出窗口)。成功返回 true。
+    async _activateWechatSNI() {
+        for (const name of await this._wechatSniNames()) {
+            try {
+                await this._dbusCall(name, SNI_PATH, SNI_IFACE, 'Activate',
+                    new GLib.Variant('(ii)', [0, 0]));
+                log(`[wt] SNI Activate 成功 (${name})`);
+                return true;
+            } catch (e) {
+                log(`[wt] SNI Activate 失败 (${name}): ${e}`);
+            }
+        }
+        return false;
+    }
+
+    // 可被 disable() 打断的 sleep(定时器统一登记在 this._timers 里)
+    _sleep(ms) {
+        return new Promise(resolve => {
+            const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+                this._timers.delete(id);
+                this._sleepers.delete(id);
+                resolve();
+                return GLib.SOURCE_REMOVE;
+            });
+            this._timers.add(id);
+            this._sleepers.set(id, resolve);
+        });
+    }
+
+    // 呼出微信: 在托盘里就直接 Activate; 没在跑就启动, 等 SNI 注册好再 Activate。
+    // (与脚本流程一一对应, 只是不再派生外部进程)
+    async _presentWechat() {
+        if (this._presenting)
+            return;                     // 连按 Alt+s 不叠加
+        this._presenting = true;
+        try {
+            if (await this._activateWechatSNI())
+                return;                 // 已在托盘 → 已呼出
+            log(`[wt] 未发现微信托盘 SNI → 启动/唤起 ${WECHAT_BIN}`);
+            try {
+                // 已在运行时: 微信是单实例, 再启一次会唤起已有实例(脚本同款兜底)
+                GLib.spawn_command_line_async(WECHAT_BIN);
+            } catch (e) {
+                log(`[wt] 启动微信失败: ${e}`);
+            }
+            for (let i = 0; i < SNI_WAIT_TRIES; i++) {
+                await this._sleep(SNI_WAIT_MS);
+                if (!this._settings)    // 扩展已禁用 → 放弃
+                    return;
+                if (await this._activateWechatSNI()) {
+                    log('[wt] 启动后呼出成功');
+                    return;
+                }
+            }
+            log('[wt] 等待微信托盘 SNI 超时(约 10s)');
+        } catch (e) {
+            log(`[wt] present 异常: ${e}`);
+        } finally {
+            this._presenting = false;
         }
     }
 }
