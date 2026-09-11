@@ -1,0 +1,8 @@
+{
+  "uuid": "wechat-toggle@coderleox.github.io",
+  "name": "WeChat Window Toggle",
+  "description": "Toggles the WeChat for Linux main window between visible and the system tray with a global shortcut, and restores the size and position the window had before.\n\nWeChat has no window management commands of its own, so the extension talks to the tray icon to show the window and asks the window to close to hide it again.\n\nUnofficial extension. Not affiliated with, endorsed by or supported by Tencent. \"WeChat\" and \"微信\" are trademarks of Tencent Holdings Ltd.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle",
+  "settings-schema": "org.gnome.shell.extensions.wechat-toggle"
+}

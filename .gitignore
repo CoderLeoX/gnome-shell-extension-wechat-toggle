@@ -1,0 +1,14 @@
+# Compiled GSettings schema
+gschemas.compiled
+
+# Build output
+dist/
+*.zip
+
+# Translations
+*.mo
+
+# Editors and tools
+.vscode/
+*.swp
+.eslintcache
