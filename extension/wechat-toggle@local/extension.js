@@ -9,6 +9,26 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 // 微信没在运行则启动它。该命令已命令行实测可靠(比在扩展里手工解析 DBus 更稳)。
 const TOGGLE_SCRIPT = '/home/ly/bin/desktop/toggle-wechat.sh';
 
+// ============================ 尺寸门槛(重要) ============================
+// 微信启动/登录时, 会先出现一个很小的“登录/自动登录”中转窗口(实测 280x380),
+// 它的 wm_class 同样是 wechat、标题同样是“微信”, 单凭类名/标题无法与主窗口区分。
+// 这正是这个扩展最容易踩的坑:
+//   * 它被当成主窗 → 关闭时触发 unmanaged, 把 "1580,506,280,380" 写进
+//     last-geometry, 于是紧接着创建的主窗口被“恢复”成 280x380
+//     → 登录成功后窗口又小又别扭。
+//   * 它还会被 move_resize 强行放大(它自己不接受, 白折腾)。
+// 所以: 比主窗口最小尺寸还小的微信窗口, 一律只观察、不干预、不记忆。
+const MAIN_MIN_W = 500;
+const MAIN_MIN_H = 400;
+
+// 主窗口出现后继续校准的时长: 微信登录完成/首次显示后还会自己再定一次尺寸,
+// 早退就会被它覆盖, 所以要多盯一会儿。单位毫秒。
+const ENFORCE_MS = 3000;
+// 位置+尺寸连续吻合这么多拍就认为稳定, 提前收工
+const SETTLE_TICKS = 12;
+// 轮询间隔(毫秒)
+const TICK_MS = 60;
+
 export default class WechatToggleExtension extends Extension {
     enable() {
         // GNOME 50: getSettings() 需要显式传 schema id(不再从 uuid 自动推导)
@@ -51,8 +71,9 @@ export default class WechatToggleExtension extends Extension {
         this._settings = null;
     }
 
-    // 判断某窗口是否为微信"主窗口"(排除 WeChatAppEx / 子对话框)
-    _isWechatMainWindow(win) {
+    // 判断某窗口是否为"微信的窗口"(排除 WeChatAppEx 小程序容器 / 子对话框)。
+    // 注意: 这里只按身份判定, 不代表它一定是主窗口(登录小窗也会命中)。
+    _isWechatWindow(win) {
         if (!win)
             return false;
         if (typeof win.is_attached_dialog === 'function' && win.is_attached_dialog())
@@ -64,14 +85,49 @@ export default class WechatToggleExtension extends Extension {
         return title.startsWith('微信');
     }
 
-    // 找到当前微信"主窗口"
+    // 尺寸小到不可能是主窗口 → 认定为登录/自动登录中转小窗(这类窗口碰不得)
+    _isTooSmallToBeMain(win) {
+        try {
+            const r = win.get_frame_rect();
+            return !r || r.width < MAIN_MIN_W || r.height < MAIN_MIN_H;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    // 找到当前微信"主窗口": 在微信窗口里取面积最大的那个
+    // (登录小窗、子窗口都比主窗小, 取最大即可稳定命中主窗)
     _findWechatWindow() {
         const wins = global.display.get_tab_list(Meta.TabList.NORMAL_ALL, null);
+        let best = null;
+        let bestArea = -1;
         for (const win of wins) {
-            if (this._isWechatMainWindow(win))
-                return win;
+            if (!this._isWechatWindow(win))
+                continue;
+            let area = 0;
+            try {
+                const r = win.get_frame_rect();
+                area = (r && r.width > 0 && r.height > 0) ? r.width * r.height : 0;
+            } catch (e) {}
+            if (area > bestArea) {
+                bestArea = area;
+                best = win;
+            }
         }
-        return null;
+        return best;
+    }
+
+    // 位置 + 尺寸都要吻合(老版本只比 x/y: 位置一旦对上就收工,
+    // 微信随后把尺寸改回去也不会被发现 —— 这是“窗口变小”的另一半原因)
+    _matches(win, geo) {
+        try {
+            const r = win.get_frame_rect();
+            return !!r &&
+                Math.abs(r.x - geo.x) <= 2 && Math.abs(r.y - geo.y) <= 2 &&
+                Math.abs(r.width - geo.width) <= 2 && Math.abs(r.height - geo.height) <= 2;
+        } catch (e) {
+            return false;
+        }
     }
 
     // 读取记忆的窗口几何 "x,y,w,h"
@@ -83,6 +139,13 @@ export default class WechatToggleExtension extends Extension {
             const [x, y, w, h] = s.split(',').map(Number);
             if (![x, y, w, h].every(n => Number.isFinite(n)))
                 return null;
+            // 尺寸明显不像主窗口 → 判定为被小窗污染过的坏值, 清掉自愈(绝不用它去恢复)
+            if (w < MAIN_MIN_W || h < MAIN_MIN_H) {
+                log(`[wt] geometry 疑似被小窗污染(${w}x${h}), 已清除`);
+                if (this._settings)
+                    this._settings.set_string('last-geometry', '');
+                return null;
+            }
             return {x, y, width: w, height: h};
         } catch (e) {
             return null;
@@ -92,6 +155,12 @@ export default class WechatToggleExtension extends Extension {
     // 收起/关闭前记录当前窗口几何(仅当坐标仍落在某块屏幕上, 防存到坏值)
     _rememberPosition(win) {
         try {
+            // 关键防线: 登录/自动登录小窗也会走到这里(unmanaged),
+            // 若不管尺寸就保存, 会把主窗口的记忆值污染成 280x380。
+            if (this._isTooSmallToBeMain(win)) {
+                log('[wt] remember SKIP: 窗口过小(登录/自动登录小窗), 不记忆');
+                return;
+            }
             const r = win.get_frame_rect();
             const desc = r ? `${r.x},${r.y} ${r.width}x${r.height}` : 'null';
             log(`[wt] remember frame=(${desc})`);
@@ -118,8 +187,14 @@ export default class WechatToggleExtension extends Extension {
         }
     }
 
-    // 新窗口出现: 若是微信主窗且记录了位置, 尽量在它显示(mapped)之前先放好位置,
-    // 避免"先居中显示再跳过去"的闪烁; map 后仍以极短间隔纠正, 把居中可见压到最短。
+    // 新窗口出现: 目标是"把微信主窗口摆回上次的位置和尺寸"。
+    // 与老实现的区别(就是登录后窗口变小/变别扭的原因):
+    //   1) 不再一上来就对任意新窗口 move_resize —— 那会误伤 fcitx 候选框等,
+    //      也会去掰微信那个不肯变大的登录小窗;
+    //   2) 先等类名/标题就绪, 再确认是"主窗口尺寸", 才开始动手;
+    //   3) 位置和尺寸都比对(老版本只比 x/y, 位置一对就收工, 微信随后改回
+    //      自己的尺寸也不会被发现);
+    //   4) 到位后不马上收工, 继续盯一段时间, 覆盖"登录完成后微信再自定尺寸"。
     _onWindowCreated(win) {
         const geo = this._geometry();
         if (!geo || !win)
@@ -132,51 +207,51 @@ export default class WechatToggleExtension extends Extension {
                 win.move_resize_frame(true, geo.x, geo.y, geo.width, geo.height);
             } catch (e) {}
         };
-        // 1) 立即放置一次: 若尚未 map, 决定首帧几何(零闪); 若已 map, 则作第一次纠正
-        place();
-        // 2) 极短间隔密集纠正, 覆盖 map 前后, 让居中可见时间尽量短
-        let tries = 0;
+        const started = GLib.get_monotonic_time() / 1000;
+        let settled = 0;
         let id = 0;
-        id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 4, () => {
-            tries++;
-            const gone = !win || tries > 60 ||
-                (typeof win.is_destroyed === 'function' && win.is_destroyed());
-            if (gone) {
+        id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
+            const stop = () => {
                 this._timers.delete(id);
                 return GLib.SOURCE_REMOVE;
-            }
-            if (this._isWechatMainWindow(win)) {
-                // 主窗创建成功: 挂上“窗口被关闭”钩子 → 无论 Alt+s 还是点 ✕ 都记录位置
-                if (!win._wtHooked) {
-                    win._wtHooked = true;
-                    try {
-                        win.connect('unmanaged', () => this._rememberPosition(win));
-                        log('[wt] hooked unmanaged');
-                    } catch (e) {
-                        log(`[wt] hook EXC ${e}`);
-                    }
-                }
-                // 若几何仍偏离目标则再放一次(快速收敛)
-                let near = false;
-                try {
-                    const r = win.get_frame_rect();
-                    near = r && Math.abs(r.x - geo.x) <= 2 && Math.abs(r.y - geo.y) <= 2;
-                    if (!near)
-                        place();
-                } catch (e) {}
-                // 已映射且已到位 → 完成
-                const m = win.mapped === undefined ? true : win.mapped;
-                if (m && near) {
-                    this._timers.delete(id);
-                    return GLib.SOURCE_REMOVE;
-                }
-                return GLib.SOURCE_CONTINUE;
-            }
-            // 元数据尚未就绪(标题/类还空)则继续等; 否则是别的窗口, 放弃
+            };
+            const elapsed = GLib.get_monotonic_time() / 1000 - started;
+            if (!win || (typeof win.is_destroyed === 'function' && win.is_destroyed()))
+                return stop();
+            // 元数据还没就绪(类名/标题都空) → 再等等; 一直空就放弃
             if (!win.get_wm_class() && !win.get_title())
-                return GLib.SOURCE_CONTINUE;
-            this._timers.delete(id);
-            return GLib.SOURCE_REMOVE;
+                return elapsed < 1000 ? GLib.SOURCE_CONTINUE : stop();
+            // 不是微信的窗口(fcitx 候选框等) → 绝不碰, 直接收工
+            if (!this._isWechatWindow(win)) {
+                log('[wt] created: 非微信窗口, 不干预');
+                return stop();
+            }
+            // 微信的登录/自动登录小窗(280x380 那类) → 只观察不干预:
+            // 硬掰它既掰不动, 还会在它关闭时把记忆值污染掉。
+            if (this._isTooSmallToBeMain(win))
+                return elapsed < ENFORCE_MS + 2000 ? GLib.SOURCE_CONTINUE : stop();
+
+            // 到这里才是真正的主窗口: 挂“关闭”钩子 → Alt+s 收起或点 ✕ 都会记位置
+            if (!win._wtHooked) {
+                win._wtHooked = true;
+                try {
+                    win.connect('unmanaged', () => this._rememberPosition(win));
+                    log('[wt] hooked unmanaged (main)');
+                } catch (e) {
+                    log(`[wt] hook EXC ${e}`);
+                }
+            }
+            if (win.mapped) {
+                if (!this._matches(win, geo)) {
+                    // 位置或尺寸偏离 → 再摆一次(覆盖微信自己改尺寸的情况)
+                    place();
+                    settled = 0;
+                } else if (++settled >= SETTLE_TICKS) {
+                    log('[wt] created: 主窗已稳定到位');
+                    return stop();
+                }
+            }
+            return elapsed < ENFORCE_MS + 2000 ? GLib.SOURCE_CONTINUE : stop();
         });
         this._timers.add(id);
     }
