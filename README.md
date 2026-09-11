@@ -47,6 +47,19 @@ The default shortcut is <kbd>Alt</kbd>+<kbd>s</kbd>.
 > its window is closed. Keep *Settings → General → Close window → minimize to tray*
 > enabled, otherwise the shortcut quits WeChat instead of hiding it.
 
+## Screenshots
+
+![Preferences](docs/screenshots/preferences.png)
+
+The window comes back with the size and position it had before it was hidden, and waits in
+the tray in between:
+
+![WeChat in the tray](docs/screenshots/hidden-to-tray.png)
+
+![The window restored](docs/screenshots/window-restored.png)
+
+The conversation list is pixelated on purpose in these images.
+
 ## Preferences
 
 ```bash
@@ -71,7 +84,10 @@ gnome-extensions prefs wechat-toggle@coderleox.github.io
    extension waits up to 10 seconds for the icon to be registered.
 3. **Window geometry** is stored in GSettings when the window is hidden and applied again
    when WeChat recreates the window. It is enforced for a few seconds afterwards, because
-   WeChat sets its own size once login finishes.
+   WeChat sets its own size once login finishes. The geometry is only taken from a window
+   that is neither too small nor maximized: a maximized window reports the whole work area,
+   and restoring that size is what makes Mutter bring a window back maximized. A window is
+   also never touched once it has left the window stack, which used to crash the Shell.
 4. **The login window trap.** Before the main window, WeChat briefly shows a small
    login/auto-login window (280×380 in practice) that uses the *same* WM class and title.
    It is deliberately left alone: it cannot be resized anyway, and remembering its geometry
