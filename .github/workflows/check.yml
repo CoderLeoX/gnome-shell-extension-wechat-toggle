@@ -1,0 +1,47 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate metadata and schema
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: metadata.json is valid JSON
+        run: python3 -m json.tool metadata.json > /dev/null
+
+      - name: metadata.json is well formed
+        run: |
+          python3 -c "
+          import json, re
+          data = json.load(open('metadata.json'))
+          uuid = data['uuid']
+          assert re.fullmatch(r'[A-Za-z0-9._-]+@[A-Za-z0-9._-]+', uuid), uuid
+          missing = [k for k in ('name', 'description', 'shell-version', 'url') if not data.get(k)]
+          assert not missing, f'missing keys: {missing}'
+          assert 'version' not in data, 'the version field is managed by extensions.gnome.org'
+          print('uuid:', uuid)
+          print('shell-version:', data['shell-version'])
+          "
+
+      - name: Install glib tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-bin
+
+      - name: GSettings schema compiles
+        run: glib-compile-schemas --strict --dry-run schemas/
+
+      - name: Required files are present
+        run: |
+          for file in extension.js prefs.js metadata.json LICENSE \
+                      schemas/org.gnome.shell.extensions.wechat-toggle.gschema.xml; do
+              test -f "$file" || { echo "missing: $file"; exit 1; }
+          done
+          echo "all required files present"

@@ -1,5 +1,7 @@
 # WeChat Window Toggle
 
+[![Check](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml/badge.svg)](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml)
+
 A GNOME Shell extension that shows and hides the **WeChat for Linux** main window with a
 single keyboard shortcut, and gives the window back its previous position and size.
 

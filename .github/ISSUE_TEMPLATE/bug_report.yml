@@ -1,0 +1,66 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+
+        Please enable **Debug logging** in the extension preferences first and include the
+        log lines below — that answers most questions straight away.
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: 'Output of `gnome-extensions info wechat-toggle@coderleox.github.io`'
+      placeholder: '1.0.0'
+    validations:
+      required: true
+
+  - type: input
+    id: shell
+    attributes:
+      label: GNOME Shell version and session type
+      placeholder: '50.1, Wayland'
+    validations:
+      required: true
+
+  - type: input
+    id: wechat
+    attributes:
+      label: WeChat version
+      placeholder: '4.1.9'
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug log
+      description: |
+        With debug logging enabled:
+        `journalctl -b -o cat /usr/bin/gnome-shell | grep wechat-toggle`
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: tray-setting
+    attributes:
+      label: Before reporting
+      options:
+        - label: WeChat is set to minimize to the tray when its window is closed
+          required: true
+        - label: I logged out and back in after installing or updating the extension
+          required: true

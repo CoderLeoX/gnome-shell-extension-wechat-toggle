@@ -1,5 +1,7 @@
 # WeChat Window Toggle（微信窗口切换）
 
+[![Check](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml/badge.svg)](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml)
+
 一个 GNOME Shell 扩展：用一个快捷键在「显示」和「收进系统托盘」之间切换 **微信 Linux 版**
 的主窗口，并让窗口回到收起前的位置和尺寸。
 
