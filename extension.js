@@ -56,8 +56,8 @@ const MAIN_MIN_H = 400;
    The polling stops as soon as position and size are stable, and the number of resizes is
    capped so that a window which refuses to move is not hammered. */
 const ENFORCE_MS = 3000;
-const SETTLE_TICKS = 6;
-const TICK_MS = 100;
+const SETTLE_TICKS = 8;
+const TICK_MS = 50;
 const MAX_APPLIES = 12;
 
 /* WeChat creates its window before it sets the WM class, so a window that appears right
@@ -102,13 +102,17 @@ export default class WeChatToggleExtension extends Extension {
             GLib.source_remove(sourceId);
         this._timers.clear();
 
-        /* 'unmanaged' is connected to Meta.Window objects, which outlive the extension,
-           so those handlers have to be disconnected explicitly. */
-        for (const [win, handlerId] of this._windowHandlers) {
-            try {
-                win.disconnect(handlerId);
-            } catch (e) {
-                /* The window is already gone, there is nothing to disconnect. */
+        /* The handlers are connected to Meta.Window objects, which outlive the extension,
+           so they have to be disconnected explicitly. */
+        for (const [win, state] of this._windowHandlers) {
+            for (const handlerId of [state.mappedId, state.unmanagedId]) {
+                if (!handlerId)
+                    continue;
+                try {
+                    win.disconnect(handlerId);
+                } catch (e) {
+                    /* The window is already gone, there is nothing to disconnect. */
+                }
             }
         }
         this._windowHandlers.clear();
@@ -299,19 +303,9 @@ export default class WeChatToggleExtension extends Extension {
             return;
 
         const pid = this._pidOf(win);
-
-        /* WeChat creates the window and only then sets its WM class, while the Shell shows
-           it right away at a position of its own. A window created just after WeChat's tray
-           icon was clicked is therefore placed before it becomes visible, which is what
-           removes the jump from the middle of the screen to the remembered position. */
-        if (this._isExpectedWindow(pid) && !this._isAttachedDialog(win) &&
-            !this._isTooSmallForMain(win)) {
-            this._log(`placing the window of pid ${pid} before it is shown`);
-            this._applyGeometry(win, target);
-        }
-
         const startedAt = GLib.get_monotonic_time() / 1000;
-        const state = {sourceId: 0, handlerId: 0, applies: 0, unmanaged: false, rect: null};
+        const state = {sourceId: 0, mappedId: 0, unmanagedId: 0, applies: 0,
+                       unmanaged: false};
         let settledTicks = 0;
 
         const stop = () => {
@@ -319,8 +313,32 @@ export default class WeChatToggleExtension extends Extension {
                 this._timers.delete(state.sourceId);
                 state.sourceId = 0;
             }
+            if (state.mappedId && win) {
+                try {
+                    win.disconnect(state.mappedId);
+                } catch (e) {
+                    /* The window is already gone. */
+                }
+                state.mappedId = 0;
+            }
             return GLib.SOURCE_REMOVE;
         };
+
+        /* WeChat creates the window and only then sets its WM class, while the Shell shows
+           it right away at a position of its own. A window created just after WeChat's tray
+           icon was clicked is therefore placed straight away and hooked, so that it is put
+           in place again the moment it is mapped, right before the first frame is painted.
+           The size is not checked here: a window that is still being set up can report
+           anything, and the pid already says whose it is. */
+        if (this._isExpectedWindow(pid) && !this._isAttachedDialog(win)) {
+            this._log(`placing the window of pid ${pid} ` +
+                `(mapped=${win.mapped}, size=${this._sizeOf(win)})`);
+            this._applyGeometry(win, target);
+            this._hookWindow(win, state, target, stop);
+        } else if (this._expectingWindow()) {
+            this._log(`window created while expecting pid ${this._expectedPid}: ` +
+                `pid=${pid} mapped=${win.mapped} size=${this._sizeOf(win)}`);
+        }
 
         state.sourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
             const elapsed = GLib.get_monotonic_time() / 1000 - startedAt;
@@ -347,21 +365,7 @@ export default class WeChatToggleExtension extends Extension {
                whenever it is hidden or shown, and resizing a window that is already
                unmanaged takes the whole Shell down with it (SIGSEGV), which ends the
                session. Hence the flag, which is checked before every operation. */
-            if (!state.handlerId) {
-                state.handlerId = win.connect('unmanaged', () => {
-                    state.unmanaged = true;
-                    this._windowHandlers.delete(win);
-                    this._storeRect(state.rect);
-                    stop();
-                });
-                this._windowHandlers.set(win, state.handlerId);
-            }
-
-            /* Keep the last usable geometry around: it is stored when the window goes away
-               even if it is closed without the shortcut. */
-            const rect = this._safeRect(win);
-            if (rect)
-                state.rect = rect;
+            this._hookWindow(win, state, target, stop);
 
             /* A maximized or fullscreen window is left alone: its rect is the work area,
                and applying that size is what made the window come back maximized. */
@@ -402,6 +406,14 @@ export default class WeChatToggleExtension extends Extension {
             return;
         }
 
+        /* If the only WeChat window around is too small to be the main window, it is the
+           login window and nobody is logged in yet. Closing it could quit WeChat, so the
+           shortcut does nothing until there is a real window. */
+        if (this._isTooSmallForMain(win)) {
+            this._log('toggle: only the login window is open, doing nothing');
+            return;
+        }
+
         if (win.minimized) {
             this._log('toggle: minimized, activating');
             win.activate(global.get_current_time());
@@ -432,14 +444,30 @@ export default class WeChatToggleExtension extends Extension {
         }
     }
 
-    /* True while a window of the process whose tray icon was just clicked is expected.
-       WeChat creates its window before setting the WM class, so this is the only moment at
-       which that window can be recognised, and the only chance to place it before the Shell
-       shows it somewhere else. */
+    /* Frame size of a window as "WxH", for logging. */
+    _sizeOf(win) {
+        try {
+            const rect = win.get_frame_rect();
+            return rect ? `${rect.width}x${rect.height}` : '?';
+        } catch (e) {
+            return '?';
+        }
+    }
+
+    /* True during the short moment after WeChat's tray icon was clicked, which is when the
+       window it opens in response can be expected. */
+    _expectingWindow() {
+        return !!this._expectedPid && GLib.get_monotonic_time() / 1000 < this._expectedUntil;
+    }
+
+    /* True when a window belongs to the process whose tray icon was just clicked. WeChat
+       creates its window before setting the WM class, so this is the only moment at which
+       that window can be recognised, and the only chance to place it before the Shell shows
+       it somewhere else. The pid of the tray icon's owner is what makes it exact. */
     _isExpectedWindow(pid) {
-        if (!pid || pid !== this._expectedPid)
+        if (!this._expectingWindow())
             return false;
-        return GLib.get_monotonic_time() / 1000 < this._expectedUntil;
+        return pid === this._expectedPid;
     }
 
     _applyGeometry(win, target) {
@@ -450,6 +478,45 @@ export default class WeChatToggleExtension extends Extension {
         } catch (e) {
             this._log(`move_resize_frame failed: ${e}`);
         }
+    }
+
+    /* Watches a window that belongs to WeChat.
+
+       It is placed again as soon as the Shell maps it: a geometry set before the client's
+       first commit does not survive that commit, and mapping happens just before the first
+       frame is painted, so this is the earliest moment at which the window can be put in
+       place without a visible jump. The geometry is stored when the window goes away, which
+       also covers closing it without the shortcut. */
+    _hookWindow(win, state, target, stop) {
+        if (!state.mappedId) {
+            state.mappedId = win.connect('notify::mapped', () => {
+                if (!win.mapped || state.unmanaged)
+                    return;
+                if (!this._matchesTarget(win, target)) {
+                    this._log(`window mapped at ${this._sizeOf(win)}, placing it`);
+                    this._applyGeometry(win, target);
+                }
+            });
+        }
+
+        if (!state.unmanagedId) {
+            state.unmanagedId = win.connect('unmanaged', () => {
+                state.unmanaged = true;
+                this._windowHandlers.delete(win);
+
+                /* The geometry is read here instead of from a cache: the window can have
+                   been moved at any point, and storing a value from the moment it appeared
+                   would freeze the position. Only reads happen on a window in this state,
+                   and a null rect (too small, or maximized) keeps the previous value. */
+                const rect = this._safeRect(win);
+                if (rect)
+                    this._storeRect(rect);
+
+                stop();
+            });
+        }
+
+        this._windowHandlers.set(win, state);
     }
 
     /* Promise wrapper around a call on the session bus. */

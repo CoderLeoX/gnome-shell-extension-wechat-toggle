@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The remembered geometry stopped following the window: the value stored when a window
+  disappeared came from a cache that was only filled while that window was being placed, so
+  once that was over, moving the window changed nothing. The geometry is read from the
+  window when it goes away instead.
 - The geometry was never restored and the window stayed centred: the maximized check called
   `get_maximized()`, which `Meta.Window` does not expose in the GJS bindings, and the
   resulting TypeError removed the polling source before anything was applied. Maximized
@@ -26,10 +30,11 @@ All notable changes to this project are documented here. The format follows
   all: starting a chat client behind the user's back is more than the extension should do,
   and a WeChat that is not running has no window to show. The executable setting and its
   auto-detection were removed along with it.
-- The window is placed before it is mapped, so it no longer shows up in the middle of the
-  screen and jumps to the remembered position a moment later. WeChat creates its window
-  before it sets the WM class, so a window created right after its tray icon was clicked is
-  recognised by its process id.
+- The window is placed as soon as the Shell maps it, so it no longer shows up in the middle
+  of the screen and jumps to the remembered position a moment later. A geometry set before
+  the client's first commit does not survive that commit, and WeChat only sets the WM class
+  afterwards, so a window that appears right after its tray icon was clicked is recognised
+  by the process id that owns that icon.
 - Only windows that turn out to belong to WeChat are logged, so enabling debug logging no
   longer fills the journal with input method candidate windows.
 - The geometry is applied with a non-interactive resize, so window tiling extensions no

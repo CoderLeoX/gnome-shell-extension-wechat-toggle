@@ -88,8 +88,9 @@ gnome-extensions prefs wechat-toggle@coderleox.github.io
    and restoring that size is what makes Mutter bring a window back maximized. A window is
    also never touched once it has left the window stack, which used to crash the Shell.
    To avoid a visible jump, a window created right after WeChat's tray icon was clicked is
-   placed while it is still unmapped: WeChat sets the WM class only after it has created the
-   window, so the process id is what identifies it at that moment.
+   recognised by the process id that owns that icon and placed twice: once right away, and
+   again when the Shell maps it. A geometry set before the client's first commit does not
+   survive that commit, and mapping happens just before the first frame is painted.
 4. **The login window trap.** Before the main window, WeChat briefly shows a small
    login/auto-login window (280×380 in practice) that uses the *same* WM class and title.
    It is deliberately left alone: it cannot be resized anyway, and remembering its geometry
