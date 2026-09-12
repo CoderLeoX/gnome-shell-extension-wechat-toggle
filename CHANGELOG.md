@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The geometry was never restored and the window stayed centred: the maximized check called
+  `get_maximized()`, which `Meta.Window` does not expose in the GJS bindings, and the
+  resulting TypeError removed the polling source before anything was applied. Maximized
+  state is now read from the `maximized_horizontally` / `maximized_vertically` properties.
 - Resizing a window that WeChat had already withdrawn from the window stack crashed GNOME
   Shell (SIGSEGV) and ended the session. Windows are no longer touched once they are
   unmanaged, and the polling stops the moment that happens.

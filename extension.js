@@ -229,6 +229,18 @@ export default class WeChatToggleExtension extends Extension {
         }
     }
 
+    /* Maximized state is read through these two properties: Meta.Window has no
+       get_maximized() method in the GJS bindings, and calling it threw a TypeError that
+       removed the polling source, so the window was never moved and stayed centred. */
+    _isMaximized(win) {
+        try {
+            return !!win.maximized_horizontally || !!win.maximized_vertically ||
+                !!win.fullscreen;
+        } catch (e) {
+            return false;
+        }
+    }
+
     /* Frame rect that is safe to restore later, or null when the window is a bad source:
        too small to be the main window (the login window), or maximized, because its rect
        is then the whole work area and restoring that size makes the window come back
@@ -238,7 +250,7 @@ export default class WeChatToggleExtension extends Extension {
             if (this._isTooSmallForMain(win))
                 return null;
 
-            if (win.get_maximized() !== 0 || win.fullscreen)
+            if (this._isMaximized(win))
                 return null;
 
             const rect = win.get_frame_rect();
@@ -352,7 +364,7 @@ export default class WeChatToggleExtension extends Extension {
 
             /* A maximized or fullscreen window is left alone: its rect is the work area,
                and applying that size is what made the window come back maximized. */
-            if (win.get_maximized() !== 0 || win.fullscreen) {
+            if (this._isMaximized(win)) {
                 this._log('window is maximized, not touching the geometry');
                 return stop();
             }
