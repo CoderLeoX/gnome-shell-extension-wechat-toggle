@@ -12,11 +12,6 @@
       <summary>Position and size of the WeChat window</summary>
       <description>Window geometry as "x,y,width,height". Stored when the window is hidden and applied again when it is shown.</description>
     </key>
-    <key type="s" name="wechat-path">
-      <default>''</default>
-      <summary>Path to the WeChat executable</summary>
-      <description>Leave empty to look for "wechat" in PATH and in the usual install locations.</description>
-    </key>
     <key type="b" name="debug">
       <default>false</default>
       <summary>Debug logging</summary>

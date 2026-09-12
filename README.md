@@ -41,7 +41,7 @@ The default shortcut is <kbd>Alt</kbd>+<kbd>s</kbd>.
 | --- | --- |
 | Main window visible | Asks the window to close, which sends it to the tray |
 | Hidden in the tray | Clicks its tray icon, so the window returns where it was |
-| Not running | Starts WeChat and shows it as soon as the tray icon appears |
+| Not running | Nothing happens: the extension does not start WeChat for you |
 
 > **Important:** hiding relies on WeChat's own behaviour of minimizing to the tray when
 > its window is closed. Keep *Settings → General → Close window → minimize to tray*
@@ -67,7 +67,6 @@ gnome-extensions prefs wechat-toggle@coderleox.github.io
 ```
 
 - **Shortcut** – any key combination with at least one modifier
-- **WeChat executable** – leave empty to search `PATH` and the usual install locations
 - **Debug logging** – off by default; everything the extension does is silent unless this
   is enabled
 - **Forget window geometry** – drops the remembered position and size
@@ -80,14 +79,17 @@ gnome-extensions prefs wechat-toggle@coderleox.github.io
 2. **Showing** replays a click on WeChat's tray icon: the extension lists the session bus
    names, resolves the owner of each `org.kde.StatusNotifierItem-*` name with
    `GetConnectionUnixProcessID`, checks `/proc/<pid>/comm` to make sure the item belongs to
-   WeChat, and calls `Activate` on it. When no item exists, WeChat is started and the
-   extension waits up to 10 seconds for the icon to be registered.
+   WeChat, and calls `Activate` on it. With no such item WeChat is not running and nothing
+   happens: the extension never starts the client itself.
 3. **Window geometry** is stored in GSettings when the window is hidden and applied again
    when WeChat recreates the window. It is enforced for a few seconds afterwards, because
    WeChat sets its own size once login finishes. The geometry is only taken from a window
    that is neither too small nor maximized: a maximized window reports the whole work area,
    and restoring that size is what makes Mutter bring a window back maximized. A window is
    also never touched once it has left the window stack, which used to crash the Shell.
+   To avoid a visible jump, a window created right after WeChat's tray icon was clicked is
+   placed while it is still unmapped: WeChat sets the WM class only after it has created the
+   window, so the process id is what identifies it at that moment.
 4. **The login window trap.** Before the main window, WeChat briefly shows a small
    login/auto-login window (280×380 in practice) that uses the *same* WM class and title.
    It is deliberately left alone: it cannot be resized anyway, and remembering its geometry

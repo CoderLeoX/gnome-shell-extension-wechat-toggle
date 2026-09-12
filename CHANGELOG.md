@@ -22,6 +22,16 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The extension no longer starts WeChat. With no tray icon the shortcut does nothing at
+  all: starting a chat client behind the user's back is more than the extension should do,
+  and a WeChat that is not running has no window to show. The executable setting and its
+  auto-detection were removed along with it.
+- The window is placed before it is mapped, so it no longer shows up in the middle of the
+  screen and jumps to the remembered position a moment later. WeChat creates its window
+  before it sets the WM class, so a window created right after its tray icon was clicked is
+  recognised by its process id.
+- Only windows that turn out to belong to WeChat are logged, so enabling debug logging no
+  longer fills the journal with input method candidate windows.
 - The geometry is applied with a non-interactive resize, so window tiling extensions no
   longer read it as a user action and snap the window to one of their tiles.
 - The number of resize attempts is capped and the polling interval is longer.

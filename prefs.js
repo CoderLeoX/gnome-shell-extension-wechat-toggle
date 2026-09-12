@@ -6,14 +6,10 @@
 import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
-import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-
-/* Same fallbacks as the extension itself. */
-const WECHAT_PATHS = ['/usr/bin/wechat', '/usr/local/bin/wechat', '/opt/wechat/wechat'];
 
 /* Keys that are not a usable shortcut on their own. */
 const MODIFIER_KEYS = new Set([
@@ -33,19 +29,6 @@ function acceleratorName(keyval, keycode, mask) {
     } catch (e) {
         return Gtk.accelerator_name(keyval, mask);
     }
-}
-
-function detectWechat() {
-    const inPath = GLib.find_program_in_path('wechat');
-    if (inPath)
-        return inPath;
-
-    for (const path of WECHAT_PATHS) {
-        if (GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE))
-            return path;
-    }
-
-    return null;
 }
 
 /* Modal window that grabs one key combination and emits it as an accelerator string. */
@@ -127,7 +110,6 @@ export default class WeChatTogglePreferences extends ExtensionPreferences {
 
         const page = new Adw.PreferencesPage();
         page.add(this._shortcutGroup(window, settings));
-        page.add(this._wechatGroup(settings));
         page.add(this._advancedGroup(settings));
         window.add(page);
     }
@@ -174,26 +156,6 @@ export default class WeChatTogglePreferences extends ExtensionPreferences {
         row.add_suffix(resetButton);
         row.activatable_widget = setButton;
         group.add(row);
-
-        return group;
-    }
-
-    _wechatGroup(settings) {
-        const group = new Adw.PreferencesGroup({title: 'WeChat'});
-
-        const pathRow = new Adw.EntryRow({
-            title: 'Executable',
-            show_apply_button: true,
-            text: settings.get_string('wechat-path'),
-        });
-        pathRow.connect('apply', () => settings.set_string('wechat-path', pathRow.text.trim()));
-        group.add(pathRow);
-
-        const detected = detectWechat();
-        group.add(new Adw.ActionRow({
-            title: 'Detected automatically',
-            subtitle: detected ?? 'Not found in PATH or in the usual locations',
-        }));
 
         return group;
     }

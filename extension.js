@@ -38,9 +38,6 @@ const SNI_IFACE = 'org.kde.StatusNotifierItem';
    applications publish their icons on the same bus. */
 const WECHAT_COMM = 'wechat';
 
-/* Tried in order when the executable is neither configured nor found in PATH. */
-const WECHAT_PATHS = ['/usr/bin/wechat', '/usr/local/bin/wechat', '/opt/wechat/wechat'];
-
 const DBUS_DEST = 'org.freedesktop.DBus';
 const DBUS_PATH = '/org/freedesktop/DBus';
 const DBUS_IFACE = 'org.freedesktop.DBus';
@@ -63,9 +60,11 @@ const SETTLE_TICKS = 6;
 const TICK_MS = 100;
 const MAX_APPLIES = 12;
 
-/* 20 x 500ms budget for a freshly started WeChat to publish its tray icon. */
-const SNI_WAIT_TRIES = 20;
-const SNI_WAIT_MS = 500;
+/* WeChat creates its window before it sets the WM class, so a window that appears right
+   after its tray icon was clicked is identified by its pid instead. Placing it while it is
+   still unmapped is what keeps it from visibly jumping from the position the Shell picks
+   to the remembered one. */
+const EXPECT_MS = 2000;
 
 export default class WeChatToggleExtension extends Extension {
     enable() {
@@ -74,9 +73,11 @@ export default class WeChatToggleExtension extends Extension {
         /* Main loop sources and signal handlers created at runtime, all of them tracked
            so that disable() can get rid of them. */
         this._timers = new Set();
-        this._sleepers = new Map();
         this._windowHandlers = new Map();
         this._presenting = false;
+        /* Pid of the process whose window is expected next, and until when. */
+        this._expectedPid = 0;
+        this._expectedUntil = 0;
 
         Main.wm.addKeybinding(
             'toggle-wechat',
@@ -97,11 +98,6 @@ export default class WeChatToggleExtension extends Extension {
             this._winCreatedId = 0;
         }
 
-        /* Resolve waits first; the code behind them returns once _settings is null. */
-        for (const resolve of this._sleepers.values())
-            resolve();
-        this._sleepers.clear();
-
         for (const sourceId of this._timers)
             GLib.source_remove(sourceId);
         this._timers.clear();
@@ -118,6 +114,7 @@ export default class WeChatToggleExtension extends Extension {
         this._windowHandlers.clear();
 
         this._presenting = false;
+        this._expectedPid = 0;
         this._settings = null;
     }
 
@@ -130,13 +127,14 @@ export default class WeChatToggleExtension extends Extension {
 
     /* ------ WeChat window helpers ------ */
 
+    _isAttachedDialog(win) {
+        return typeof win.is_attached_dialog === 'function' && win.is_attached_dialog();
+    }
+
     /* Matches any window belonging to WeChat, including the small login window. Code
        that needs the real main window has to check the size as well. */
     _isWechatWindow(win) {
-        if (!win)
-            return false;
-
-        if (typeof win.is_attached_dialog === 'function' && win.is_attached_dialog())
+        if (!win || this._isAttachedDialog(win))
             return false;
 
         const wmClass = (win.get_wm_class() || '').toLowerCase();
@@ -300,7 +298,17 @@ export default class WeChatToggleExtension extends Extension {
         if (!target || !win)
             return;
 
-        this._log(`window created (mapped=${win.mapped}, class=${win.get_wm_class() || '-'})`);
+        const pid = this._pidOf(win);
+
+        /* WeChat creates the window and only then sets its WM class, while the Shell shows
+           it right away at a position of its own. A window created just after WeChat's tray
+           icon was clicked is therefore placed before it becomes visible, which is what
+           removes the jump from the middle of the screen to the remembered position. */
+        if (this._isExpectedWindow(pid) && !this._isAttachedDialog(win) &&
+            !this._isTooSmallForMain(win)) {
+            this._log(`placing the window of pid ${pid} before it is shown`);
+            this._applyGeometry(win, target);
+        }
 
         const startedAt = GLib.get_monotonic_time() / 1000;
         const state = {sourceId: 0, handlerId: 0, applies: 0, unmanaged: false, rect: null};
@@ -314,32 +322,25 @@ export default class WeChatToggleExtension extends Extension {
             return GLib.SOURCE_REMOVE;
         };
 
-        const apply = () => {
-            try {
-                /* user_op is false on purpose: a resize that looks like a user action makes
-                   window tiling extensions snap the window to a tile of their layout. */
-                win.move_resize_frame(false, target.x, target.y, target.width, target.height);
-            } catch (e) {
-                this._log(`move_resize_frame failed: ${e}`);
-            }
-        };
-
         state.sourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, TICK_MS, () => {
             const elapsed = GLib.get_monotonic_time() / 1000 - startedAt;
 
             if (state.unmanaged || !win)
                 return stop();
 
-            /* WM class and title are still empty right after creation. */
-            if (!win.get_wm_class() && !win.get_title())
-                return elapsed < 1000 ? GLib.SOURCE_CONTINUE : stop();
-
-            /* Not our window (input method candidates, notifications, ...). */
-            if (!this._isWechatWindow(win))
+            /* The pid gives the window away before WeChat sets the class; afterwards the
+               class identifies windows that show up for other reasons. */
+            if (!this._isExpectedWindow(pid) && !this._isWechatWindow(win)) {
+                /* A fresh window has no class or title yet, give it a moment. */
+                if (!win.get_wm_class() && !win.get_title())
+                    return elapsed < 1000 ? GLib.SOURCE_CONTINUE : stop();
                 return stop();
+            }
 
             if (this._isTooSmallForMain(win))
                 return elapsed < ENFORCE_MS ? GLib.SOURCE_CONTINUE : stop();
+
+            this._log(`tracking window (mapped=${win.mapped}, class=${win.get_wm_class() || '-'})`);
 
             /* The window is about to be touched, so make sure it stops being touched the
                moment it leaves the window stack. WeChat destroys and recreates its window
@@ -377,7 +378,7 @@ export default class WeChatToggleExtension extends Extension {
                     this._log('giving up on the window geometry');
                     return stop();
                 }
-                apply();
+                this._applyGeometry(win, target);
                 settledTicks = 0;
             } else if (++settledTicks >= SETTLE_TICKS) {
                 this._log('main window is in place');
@@ -396,7 +397,7 @@ export default class WeChatToggleExtension extends Extension {
         const win = this._findWechatWindow();
 
         if (!win) {
-            this._log('toggle: no window, showing WeChat');
+            this._log('toggle: no window, clicking the tray icon');
             this._showWechat().catch(e => this._log(`showing WeChat failed: ${e}`));
             return;
         }
@@ -419,25 +420,36 @@ export default class WeChatToggleExtension extends Extension {
             win.delete(time);
     }
 
-    /* ------ Showing / starting WeChat ------ */
+    /* ------ Showing WeChat ------ */
 
-    /* Path of the WeChat executable: the configured one, then PATH, then the known
-       locations. Returns null when WeChat is not installed. */
-    _wechatBinary() {
-        const configured = this._settings.get_string('wechat-path').trim();
-        if (configured)
-            return configured;
-
-        const inPath = GLib.find_program_in_path('wechat');
-        if (inPath)
-            return inPath;
-
-        for (const path of WECHAT_PATHS) {
-            if (GLib.file_test(path, GLib.FileTest.IS_EXECUTABLE))
-                return path;
+    /* Pid of the window, or 0 when the Shell cannot tell. */
+    _pidOf(win) {
+        try {
+            const pid = win.get_pid();
+            return Number.isFinite(pid) && pid > 0 ? pid : 0;
+        } catch (e) {
+            return 0;
         }
+    }
 
-        return null;
+    /* True while a window of the process whose tray icon was just clicked is expected.
+       WeChat creates its window before setting the WM class, so this is the only moment at
+       which that window can be recognised, and the only chance to place it before the Shell
+       shows it somewhere else. */
+    _isExpectedWindow(pid) {
+        if (!pid || pid !== this._expectedPid)
+            return false;
+        return GLib.get_monotonic_time() / 1000 < this._expectedUntil;
+    }
+
+    _applyGeometry(win, target) {
+        try {
+            /* user_op is false on purpose: a resize that looks like a user action makes
+               window tiling extensions snap the window to a tile of their layout. */
+            win.move_resize_frame(false, target.x, target.y, target.width, target.height);
+        } catch (e) {
+            this._log(`move_resize_frame failed: ${e}`);
+        }
     }
 
     /* Promise wrapper around a call on the session bus. */
@@ -493,7 +505,7 @@ export default class WeChatToggleExtension extends Extension {
                 const [pid] = ownerReply.deepUnpack();
 
                 if (this._processName(pid) === WECHAT_COMM)
-                    items.push(name);
+                    items.push({name, pid});
             } catch (e) {
                 /* Without owner information the item is left alone. */
             }
@@ -504,11 +516,16 @@ export default class WeChatToggleExtension extends Extension {
 
     /* Clicks WeChat's tray icon. Returns true when the request was delivered. */
     async _activateTrayItem() {
-        for (const name of await this._wechatTrayItems()) {
+        for (const {name, pid} of await this._wechatTrayItems()) {
             try {
                 await this._dbusCall(name, SNI_PATH, SNI_IFACE, 'Activate',
                     new GLib.Variant('(ii)', [0, 0]));
                 this._log(`tray item activated (${name})`);
+
+                /* WeChat is about to open its window: remember whose it will be so that it
+                   can be put in place before it appears. */
+                this._expectedPid = pid;
+                this._expectedUntil = GLib.get_monotonic_time() / 1000 + EXPECT_MS;
                 return true;
             } catch (e) {
                 this._log(`activating ${name} failed: ${e}`);
@@ -518,23 +535,13 @@ export default class WeChatToggleExtension extends Extension {
         return false;
     }
 
-    /* Sleep that disable() can interrupt; both the source and the resolver are tracked. */
-    _sleep(ms) {
-        return new Promise(resolve => {
-            const sourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
-                this._timers.delete(sourceId);
-                this._sleepers.delete(sourceId);
-                resolve();
-                return GLib.SOURCE_REMOVE;
-            });
+    /* Shows WeChat by clicking its tray icon: WeChat publishes no method for showing the
+       window, so the icon is the only way in.
 
-            this._timers.add(sourceId);
-            this._sleepers.set(sourceId, resolve);
-        });
-    }
-
-    /* Shows WeChat: activate the tray icon if it is running, otherwise start it and wait
-       for the icon to appear. */
+       Nothing is started when there is no icon. Starting a chat client behind the user's
+       back is more than this extension should do, and a WeChat that is not running has no
+       window to show, so the shortcut does nothing at all in that case. The tray icon only
+       exists while WeChat is running, which makes it the right thing to check. */
     async _showWechat() {
         if (this._presenting)
             return;
@@ -543,37 +550,9 @@ export default class WeChatToggleExtension extends Extension {
         try {
             if (await this._activateTrayItem())
                 return;
-
-            const binary = this._wechatBinary();
-            if (!binary) {
-                this._log('WeChat executable not found');
-                Main.notify('WeChat Window Toggle',
-                    'The WeChat executable could not be found. Set its path in the extension preferences.');
-                return;
-            }
-
-            this._log(`no tray icon yet, starting ${binary}`);
-            try {
-                /* WeChat is single instance, so starting it again also wakes up an
-                   instance that is running but has not published its tray icon yet. */
-                GLib.spawn_command_line_async(binary);
-            } catch (e) {
-                this._log(`starting WeChat failed: ${e}`);
-                Main.notify('WeChat Window Toggle', `Could not start WeChat: ${e.message}`);
-                return;
-            }
-
-            for (let attempt = 0; attempt < SNI_WAIT_TRIES; attempt++) {
-                await this._sleep(SNI_WAIT_MS);
-
-                if (!this._settings)
-                    return;
-
-                if (await this._activateTrayItem())
-                    return;
-            }
-
-            this._log('timed out waiting for the WeChat tray icon');
+            this._log('no WeChat tray icon, nothing to show');
+        } catch (e) {
+            this._log(`showing WeChat failed: ${e}`);
         } finally {
             this._presenting = false;
         }
