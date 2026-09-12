@@ -1,5 +1,7 @@
 # WeChat Window Toggle（微信窗口切换）
 
+[English](README.md) · **简体中文**
+
 [![Check](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml/badge.svg)](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml)
 
 一个 GNOME Shell 扩展：用一个快捷键在「显示」和「收进系统托盘」之间切换 **微信 Linux 版**
@@ -13,6 +15,9 @@
 
 - GNOME Shell 45 或更新版本，**Wayland** 会话（X11 会话有更简单的做法）
 - 微信 Linux 4.x
+- 系统托盘（SNI / AppIndicator）支持 —— 呼出窗口就是靠调微信的托盘图标实现的。
+  Ubuntu 自带 `ubuntu-appindicators` 且默认启用；其他发行版需要安装
+  *AppIndicator and KStatusNotifierItem Support* 扩展。
 - 从源码安装时需要 `glib-compile-schemas`
 
 ## 安装
@@ -27,9 +32,26 @@ cd gnome-shell-extension-wechat-toggle
 
 GNOME Shell 只在启动时加载扩展，Wayland 会话又无法原地重载，所以安装完需要注销一次。
 
+### 从 Release 安装
+
+每个 Release 都附带打好的扩展包：
+
+```bash
+gnome-extensions install --force wechat-toggle@coderleox.github.io.shell-extension.zip
+```
+
 ### 从 extensions.gnome.org 安装
 
-尚未发布，提交正在准备中。
+已提交审核：[扩展 10936](https://extensions.gnome.org/extension/10936/wechat-window-toggle/)。
+审核通过前无法从该网站安装，请先使用 Release 或源码安装。
+
+### 卸载
+
+```bash
+gnome-extensions uninstall wechat-toggle@coderleox.github.io
+```
+
+和安装一样，之后需要注销重新登录一次。
 
 ## 使用
 
@@ -112,6 +134,15 @@ busctl --user list | grep StatusNotifierItem
 ```bash
 gnome-extensions info wechat-toggle@coderleox.github.io
 ```
+
+如果按快捷键完全没有反应：
+
+- 组合键可能被其他扩展或输入法占用了。用
+  `gsettings get org.gnome.shell.extensions.wechat-toggle toggle-wechat` 看当前的绑定，
+  再到设置界面里换一个没被占用的组合。
+- 呼出窗口依赖微信的托盘图标。如果上面的 `busctl` 命令列不出 `StatusNotifierItem`，
+  说明微信没在运行，或者 Shell 本身没有托盘支持（见[环境要求](#环境要求)）。
+- 改过 `extension.js` 之后要注销重登：Shell 运行的还是启动时加载的那份代码。
 
 ## 参与开发
 

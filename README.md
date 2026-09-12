@@ -1,5 +1,7 @@
 # WeChat Window Toggle
 
+**English** · [简体中文](README.zh-CN.md)
+
 [![Check](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml/badge.svg)](https://github.com/CoderLeoX/gnome-shell-extension-wechat-toggle/actions/workflows/check.yml)
 
 A GNOME Shell extension that shows and hides the **WeChat for Linux** main window with a
@@ -14,6 +16,9 @@ show the window, and a close request to hide it.
 
 - GNOME Shell 45 or newer, in a **Wayland** session (an X11 session has better options)
 - WeChat for Linux 4.x
+- Support for SNI tray icons, which is what the extension talks to in order to show the
+  window. Ubuntu ships it (`ubuntu-appindicators`, enabled by default); on other
+  distributions install the *AppIndicator and KStatusNotifierItem Support* extension.
 - `glib-compile-schemas` when installing from source
 
 ## Installation
@@ -29,9 +34,28 @@ cd gnome-shell-extension-wechat-toggle
 A newly installed extension is only picked up when the Shell starts, and a Wayland session
 cannot be reloaded in place, so logging out once is part of the installation.
 
+### From a release
+
+Every release carries the packaged extension:
+
+```bash
+gnome-extensions install --force wechat-toggle@coderleox.github.io.shell-extension.zip
+```
+
 ### From extensions.gnome.org
 
-Not published yet — the submission is being prepared.
+Submitted for review as
+[extension 10936](https://extensions.gnome.org/extension/10936/wechat-window-toggle/).
+Nothing can be installed from that site until a reviewer has approved it, so use a release
+or the source in the meantime.
+
+### Uninstalling
+
+```bash
+gnome-extensions uninstall wechat-toggle@coderleox.github.io
+```
+
+Log out once afterwards, as with the installation.
 
 ## Usage
 
@@ -125,6 +149,17 @@ Check that the extension is enabled:
 ```bash
 gnome-extensions info wechat-toggle@coderleox.github.io
 ```
+
+If the shortcut does nothing at all:
+
+- Another extension or the input method may have taken the key. See what the extension is
+  bound to with `gsettings get org.gnome.shell.extensions.wechat-toggle toggle-wechat` and
+  pick a free combination in the preferences.
+- Showing the window needs WeChat's tray icon. If the `busctl` command above lists no
+  `StatusNotifierItem`, WeChat is either not running or the Shell has no tray support
+  (see [Requirements](#requirements)).
+- After editing `extension.js`, log out and back in: the Shell keeps running the code it
+  loaded at startup.
 
 ## Contributing
 
